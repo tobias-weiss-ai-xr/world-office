@@ -22,4 +22,6 @@ Replaces the 2026-09-05 Python-era set (FastAPI docserver, decommissioned
 2026-10-14) — those files are preserved under
 [history/](history/) for the record.
 **Further reading:** `server/AGENTS.md` (developer workspace guide), `plan/` (runbooks, guides),
-`wo-test-harness` repo (parity census + ledger tooling).
+`wo-test-harness` repo (parity census + ledger tooling) — the harness has
+its own arc42 set + a census→ledger deep dive:
+`wo-test-harness/docs/arc42/`.
