@@ -1,103 +1,47 @@
-# 07 — Deployment View
+# 7. Deployment View
 
-> arc42 §7 · How the system is packaged, deployed, and run in its environments.
-> **Revision:** 2026-09-05
+## Production (host 192.168.42.42, `/home/weiss/opencloud-compose`)
 
-## 7.1 Topology
-
-```
-                    ┌─────────────── VPS 178.254.2.90 ────────────────┐
-                    │                                                │
-                    │   Traefik (host reverse proxy, TLS)            │
-                    │    ├─ cloud.graphwiz.ai      → OpenCloud at :9200
-                    │    └─ editor.cloud.graphwiz.ai → docserver at :8082
-                    │                                                │
-                    │   Docker project "opencloud-compose"           │
-                    │    ┌─────────────┐   ┌──────────────────┐      │
-                    │    │  OpenCloud   │   │  docserver       │      │
-                    │    │  (OCIS)  :9200│  │  FastAPI  :8082  │      │
-                    │    │  WOPI host    │   │  WOPI client     │      │
-                    │    └──────┬───────┘   └────────┬─────────┘      │
-                    │           └──── WOPI ──────────┘                │
-                    │   staging (separate) "ocstaging" :9201          │
-                    │   data: docs in OCIS store; docserver: SQLite   │
-                    │   + content dir on volume                       │
-                    └────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    Internet -->|editor.cloud.graphwiz.ai| TR["traefik edge router<br/>(host-managed)"]
+    TR --> DS1["opencloud-compose-docserver-1<br/>worldoffice/documentserver:latest<br/>192.168.42.42:8082 → 80"]
+    subgraph OC["OpenCloud compose network"]
+        OCIS["opencloud (OCIS)"]
+        COLLAB["collaboration<br/>:9300"]
+        DS1
+    end
+    VOLS["volumes (read-only mounts):
+      /home/weiss/editor-ui-ebae8fc3/{word,sheet,slide,diagram,pdf}
+      server/assets/dictionaries"]
+    DS1 --- VOLS
 ```
 
-Production URLs (per `plan/operations-runbook.md` v2.0):
+- Image: `worldoffice/documentserver:latest` — multi-stage Docker build from
+  `server/` root (`core/crates/wo-docserver/Dockerfile`; release build,
+  frontend-dist + dictionaries baked in; cargo layers cached in CI/host).
+- Editor UI is **volume-mounted over** the baked-in `editor-ui/word` — editor
+  releases are file copies into `~/editor-ui-ebae8fc3/word/`
+  (`index.html editor.js i18n.js style.css`), no image rebuild.
+- Env: `JWT_SECRET` (shared with OCIS), `WOPI_HOST_URL`, `WOPI_TOKEN_MODE=passthrough`,
+  `EDITOR_UI_DIR=/app/editor-ui`, `DOCSERVER_PORT=80`.
 
-| Service | URL | Port | Health |
-|---------|-----|------|--------|
-| OpenCloud (OCIS) | `https://cloud.graphwiz.ai` | 9200 | `GET /status` |
-| Docserver / editor | `https://editor.cloud.graphwiz.ai` | 8082 | `GET /health` |
+## Staging (host 192.168.42.42, `/home/weiss/opencloud-compose-staging`)
 
-There are **two parallel stacks** on the VPS: the public
-`opencloud-compose` project (OCIS :9200, python-docserver :8082 behind the
-Traefik fronting the public hostnames) and a separate staging compose
-(`ocstaging`, caddy, :9201) for integration testing. Mind the routing in
-memory: *public = `opencloud-compose`*, *ocstaging = :9201 only*; changes
-must never point the public hostname at the staging stack.
+Same shape: `ocstaging-docserver-1` on `192.168.42.42:8086 → 80`, plus
+`ocstaging-collaboration-1`, `ocstaging-opencloud-1`, `ocstaging-caddy-1`.
+**Operational rule:** verify converter behavior against a freshly built local
+binary or a freshly rebuilt image — staging images can be weeks stale and must
+not be trusted as ground truth for converter gaps.
 
-## 7.2 Packaging
+## CI/CD
 
-- **Docker image** `opencloud-docserver:latest` built from `Dockerfile`
-  (Python 3.12, `uv` sync of `uv.lock`).
-- **Compose** (`docker-compose.yml`): services `docserver` + `traefik`
-  (edge router with `Host(`docs.local`)` rule for dev). `DOCSERVER_JWT_SECRET`
-  from the environment; `docserver-data` volume binds `data/`.
-- **systemd** fallback (`systemd/opencloud-docserver.service`): hardened
-  unit — `User=docserver`, `NoNewPrivileges`, `PrivateTmp`,
-  `ProtectSystem=strict`, `ProtectHome`, `ReadWritePaths=.../data`,
-  `LimitNOFILE=4096`, `Restart=on-failure`; env from
-  `/etc/opencloud-docserver/env` (mode 600). `scripts/deploy-systemd.sh`
-  drives the install.
-
-## 7.3 Configuration at runtime
-
-- `config.toml` sections: `[server]` (port 8000, host 0.0.0.0), `[security]`
-  (jwt_secret, jwt_ttl=3600), `[storage]` (database, content_dir), `[app]`
-  (public_url, cors_origins).
-- Precedence: **environment variables (`DOCSERVER_*`) → config.toml → defaults**.
-- Required in production: a real secret (`openssl rand -base64 48`) shared
-  with OCIS, a reachable `DOCSERVER_PUBLIC_URL`, and a locked-down
-  `DOCSERVER_CORS_ORIGINS`.
-
-## 7.4 OpenCloud integration steps (production)
-
-1. Deploy the docserver (Docker or systemd) behind TLS.
-2. Make the discovery XML reachable: `GET {public_url}/hosting/discovery`
-   advertises `view`/`edit` actions for **docx** and **odt**.
-3. Register the docserver as the app provider for office extensions — either
-   via OpenCloud "Open App Registry" env vars (see compose comments) or the
-   OCS API helper `register_wopi_provider.py` (OCIS admin creds; previously
-   needed because the OpenCloud collaboration service was unreliable).
-4. Share the JWT secret; verify end-to-end with
-   `scripts/validate_wopi_e2e.sh` (~tests `test_wopi_*`, `test_client_mode.py`).
-
-## 7.5 Environments
-
-| Environment | Purpose | Form |
-|-------------|---------|------|
-| **Local dev** | Fast ramp-up | `uv run uvicorn src.main:app --reload`; local WOPI host mode; SQLite in `data/`; WOPI discovery + `/docs` (OpenAPI) |
-| **CI** | Correctness gate | GitHub Actions `docserver.yml`: pytest (unit, golden, property, AI, WOPI), ruff, Playwright browser E2E against a mock/local WOPI host |
-| **Staging** (`ocstaging`, :9201) | Integration w/ OCIS | Separate compose on VPS; used for OCIS-versioned WOPI validation |
-| **Production** (`opencloud-compose`) | Live | See 7.1; rolling update = rebuild image + `docker compose up -d --build`; data survives on volume |
-
-## 7.6 Data & backup
-
-- Canonical user documents: **inside OCIS** (its store). The docserver's
-  SQLite + content dir are caches/ledger for host mode and version snapshots.
-- Version snapshots under `data/documents/versions/<doc_id>/<ts>.bin` —
-  backup the volume; restoring a snapshot is a product feature
-  (`POST .../versions/{ts}/restore`).
-
-## 7.7 Observability
-
-- `GET /health` for probes; structured `logging` to stdout/stderr (no log
-  files, per Stoic convention).
-- Grafana panel `grafana/docserver-health.json` (`/health` metrics);
-  Prometheus scrapes the health endpoint per ops runbook.
-- Failure modes are self-describing: `WopiError` → JSON + status; store
-  corruption is reported as typed `DocumentStoreError` and storage is not a
-  valid DB ⇒ the process stays up long enough for operators to react.
+- GitHub Actions workflows: ci, deploy, docker, release, security, wasm.
+- Docker build matrix covers: identity-, storage-, conversion-,
+  coauthoring-, session-service, api-gateway, wo-docserver.
+- Rust CI: shared cargo registry cache, `--test-threads=1` for unit tests;
+  wo-pdf/wo-webdav excluded from fmt/clippy; cold-worktree `cargo test` is
+  the expensive gate (>620 s).
+- Deploy sequence (editor): build gates → copy 4 files to deploy dir →
+  curl+cmp verify → pageerror sweep → prod container restart if docserver
+  binary changed (rebuild image first).
