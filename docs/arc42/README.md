@@ -18,5 +18,8 @@ Documented with the [arc42](https://arc42.org) template. One file per section.
 | 12 | Glossary | [12-glossary.md](12-glossary.md) |
 
 **Status:** initial version 2026-10-27, written against server @ `bc57a9214`.
+Replaces the 2026-09-05 Python-era set (FastAPI docserver, decommissioned
+2026-10-14) — those files are preserved under
+[history/](history/) for the record.
 **Further reading:** `server/AGENTS.md` (developer workspace guide), `plan/` (runbooks, guides),
 `wo-test-harness` repo (parity census + ledger tooling).
